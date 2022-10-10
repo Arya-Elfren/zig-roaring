@@ -3,50 +3,43 @@ const U32 = @import("RoaringBitmap.zig").U32;
 
 const Sparse = @This();
 
-test "Buffer" {
-    std.testing.refAllDecls(Buffer);
-}
-
 const Buffer = struct {
     b: [MaxLen]U32.LSB,
 
+    // All u12s can index into this Buffer
     pub const MaxLen = std.math.maxInt(Idx.Type) + 1;
-
-    test "Idx" {
-        std.testing.refAllDecls(Idx);
-    }
 
     pub const Idx = struct {
         b: Type,
 
         pub const Type = u12;
 
-        pub fn len(self: Idx) u13 {
-            return @as(u13, self.b) + 1;
-        }
-
-        test "size" {
+        test "SparseMap.Buffer.Idx @sizeOf" {
             try std.testing.expectEqual(
                 @sizeOf(u12),
                 @sizeOf(Idx),
             );
         }
 
-        test "bitSize" {
+        test "SparseMap.Buffer.Idx @bitSizeOf" {
             try std.testing.expectEqual(
                 @bitSizeOf(u12),
                 @bitSizeOf(Idx),
             );
         }
 
-        test "len max" {
+        pub fn len(self: Idx) u13 {
+            return @as(u13, self.b) + 1;
+        }
+
+        test "SparseMap.Buffer.Idx.len max" {
             try std.testing.expectEqual(
                 (Idx{ .b = std.math.maxInt(u12) }).len(),
                 std.math.maxInt(u12) + 1,
             );
         }
 
-        test "len 0" {
+        test "SparseMap.Buffer.Idx.len 0" {
             try std.testing.expectEqual(
                 (Idx{ .b = 0 }).len(),
                 1,
@@ -54,37 +47,38 @@ const Buffer = struct {
         }
     };
 
-    test "size" {
+    test "SparseMap.Buffer @sizeOf" {
         try std.testing.expectEqual(
             @sizeOf(u16) * Buffer.MaxLen,
             @sizeOf(Buffer),
         );
     }
 
-    test "bitSize" {
+    test "SparseMap.Buffer @bitSizeOf" {
         try std.testing.expectEqual(
             @bitSizeOf(u16) * Buffer.MaxLen,
             @bitSizeOf(Buffer),
         );
     }
 
-    test "max index" {
+    test "SparseMap.Buffer max Idx is valid" {
         // The max index can't be out of bounds.
         _ = (Buffer{ .b = undefined }).b[(Idx{ .b = std.math.maxInt(Idx.Type) }).b];
     }
 };
 
+/// A buffer of [4096]u16 using a custom struct for type checks and methods.
 buffer: Buffer,
 idx: Buffer.Idx,
 
-test "size" {
+test "SparseMap @sizeOf" {
     try std.testing.expectEqual(
         @sizeOf(u16) * Buffer.MaxLen + @sizeOf(Buffer.Idx),
         @sizeOf(Sparse),
     );
 }
 
-test "bitSize" {
+test "SparseMap @bitSizeOf" {
     try std.testing.expectEqual(
         @bitSizeOf(u16) * Buffer.MaxLen + @bitSizeOf(Buffer.Idx),
         @bitSizeOf(Sparse),
@@ -105,17 +99,10 @@ pub fn init(
         .buffer = .{ .b = undefined },
         .idx = .{ .b = 0 },
     };
-    ret.buffer.b[0] = elem;
+    ret.buffer.b[ret.idx.b] = elem;
     // The set should already be a valid set.
     ret.assertInvariants();
     return ret;
-}
-
-test "init/deinit" {
-    const sparse = try Sparse.init(std.testing.allocator, .{ .b = 0 });
-    defer sparse.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u16, 0), sparse.buffer.b[0].b);
-    try std.testing.expectEqual(@as(u13, 1), sparse.idx.len());
 }
 
 pub fn deinit(
@@ -124,6 +111,40 @@ pub fn deinit(
 ) void {
     self.* = undefined;
     alloc.destroy(self);
+}
+
+test "SparseMap init/deinit" {
+    {
+    const sparse = try Sparse.init(std.testing.allocator, .{ .b = 0 });
+    defer sparse.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 0), sparse.buffer.b[sparse.idx.b].b);
+    try std.testing.expectEqual(@as(u13, 1), sparse.idx.len());
+}
+{
+    const sparse = try Sparse.init(std.testing.allocator, .{ .b = std.math.maxInt(u16) });
+    defer sparse.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), sparse.buffer.b[sparse.idx.b].b);
+    try std.testing.expectEqual(@as(u13, 1), sparse.idx.len());
+}
+}
+
+test "SparseMap checkAllAllocationFailures" {
+    const checkFn = struct {
+        fn check(
+            backing_allocator: std.mem.Allocator,
+            elem: U32.LSB,
+        ) !void {
+            const sparse = try Sparse.init(backing_allocator, elem);
+            defer sparse.deinit(backing_allocator);
+            try std.testing.expectEqual(elem.b, sparse.buffer.b[sparse.idx.b].b);
+            try std.testing.expectEqual(@as(u13, 1), sparse.idx.len());
+        }
+    }.check;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkFn,
+        .{U32.LSB{ .b = 0}},
+    );
 }
 
 /// Add an element to the SparseSet.
@@ -136,7 +157,7 @@ pub fn add(
         return error.Full;
     }
     switch (self.findClosest(lsb)) {
-        // It's a set so if it's already contained in the set don't add it
+        // It's a set so if it's already contained in the set don't add it, just assert that it's actually there.
         .Found => |found_at_index| {
             std.debug.assert(lsb.b == self.buffer.b[found_at_index.b].b);
         },
@@ -190,17 +211,18 @@ pub fn remove(
             self.idx.b -= 1;
         },
         .Closest => |closest_index| {
+            // TODO-DOC: Explain?
             if (lsb.b < self.idx.b) {
                 std.debug.assert(lsb.b < self.buffer.b[closest_index.b].b);
             }
         },
     }
     // If the buffer isn't full, every element after the last one is undefined.
-    // if (!self.full()) {
-    //     for (self.buffer.b[self.idx.len()..]) |_, idx| {
-    //         self.buffer.b[idx] = undefined;
-    //    }
-    // }
+    if (!self.full()) {
+        for (self.buffer.b[self.idx.len()..]) |_, idx| {
+            self.buffer.b[idx] = undefined;
+       }
+    }
     // Only works because if the cardinality is 0 this would have returned earlier.
     self.assertInvariants();
 }
@@ -324,6 +346,49 @@ test "find closest 'empty'" {
     try std.testing.expectEqual(
         sparse.findClosest(.{ .b = 3 }),
         .{ .Closest = .{ .b = 1 } },
+    );
+}
+
+test "SparseMap findClosest small" {
+    var sparse = Sparse{
+        .buffer = .{ .b = undefined},
+        .idx = .{ .b = 3 },
+    };
+    {
+        var i: u16 = 0;
+        while (i < 4) : (i += 1) {
+            sparse.buffer.b[i] = .{ .b = i + 3 };
+        }
+        sparse.buffer.b[0] = .{ .b = 2 };
+    }
+
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 0 }),
+        .{ .Closest = .{ .b = 0 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 2 }),
+        .{ .Found = .{ .b = 0 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 3 }),
+        .{ .Closest = .{ .b = 1 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 4 }),
+        .{ .Found = .{ .b = 1 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 5 }),
+        .{ .Found = .{ .b = 2 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 6 }),
+        .{ .Found = .{ .b = 3 } },
+    );
+    try std.testing.expectEqual(
+        sparse.findClosest(.{ .b = 7 }),
+        .{ .Closest = .{ .b = 4 } },
     );
 }
 
